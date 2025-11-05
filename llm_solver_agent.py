@@ -15,14 +15,48 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from datetime import datetime
 from config import calculate_cost
-from datasets import load_dataset
-from huggingface_hub import login
+# from datasets import load_dataset
+# from huggingface_hub import login
 
-HF_REPO_ID = "heurigen/heurigen-data"
+# HF_REPO_ID = "heurigen/heurigen-data"
 
 # Configure logging
+from pathlib import Path
+# ... 现有导入保持
+# === 本地数据加载器（替代 HuggingFace） ===
+# === 本地数据加载器（替代 HuggingFace；统一绝对路径） ===
+def load_local_dataset(problem: str, data_root: str = "_datasets", pattern: str = "*.mat") -> Dict:
+    """
+    返回:
+    {
+      "demo": {"file_path": [...]},   # _datasets/<problem>/demo/*.mat（若无，则退回 _datasets/<problem>）
+      "eval": {"file_path": [...]},   # _datasets/<problem>/eval/*.mat（若无，则空列表）
+    }
+    全部为绝对路径。
+    """
+    root = (Path(data_root) / problem).expanduser().resolve()
+    demo_dir = root / "demo"
+    eval_dir = root / "eval"
+
+    def _list(dirpath: Path) -> list[str]:
+        if not dirpath.exists():
+            return []
+        return [str(p.expanduser().resolve()) for p in sorted(dirpath.rglob(pattern)) if p.is_file()]
+
+    demo_files = _list(demo_dir) or _list(root)   # 没有 demo/ 就退回问题根目录（兼容旧结构）
+    eval_files = _list(eval_dir)                  # 没有 eval/ 就给空表
+
+    if not demo_files:
+        raise FileNotFoundError(f"No files found for demo under: {demo_dir if demo_dir.exists() else root} with pattern '{pattern}'")
+
+    return {"demo": {"file_path": demo_files}, "eval": {"file_path": eval_files}}
+
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# === offline mode helper ===
+def _is_offline_model(name: str) -> bool:
+    return name is None or str(name).strip().lower() in {"dummy", "offline", "none"}
 
 def get_git_commit_id() -> str:
     """Get the current git commit ID."""
@@ -170,10 +204,10 @@ class ProgramExecutor:
         """Runs the Python program and returns success status and output."""
         try:
             # Get file paths from the dataset
-            if not self.dataset or "train" not in self.dataset:
+            if not self.dataset or "demo" not in self.dataset:
                 return False, f"Dataset not found or invalid format for {self.problem_folder.name}"
             
-            file_paths = self.dataset["train"]["file_path"]
+            file_paths = self.dataset["demo"]["file_path"]
             if not file_paths:
                 return False, f"No test cases found in the dataset for {self.problem_folder.name}"
             
@@ -219,11 +253,14 @@ class ProgramExecutor:
                 cost_file = output_dir / f"{base_name}.cost"
                 
                 try:
-                    # Prepare the command with all input files in the group
-                    cmd = ['taskset', '-c', '0-' + str(self.num_cores - 1), 'python3', 'main.py']
-                    cmd.extend(sorted(group_files))  # Add all input files
-                    cmd.append(str(output_file))  # Add output file
-                    
+                    # 先把所有输入&输出变成绝对路径（防止 cwd 变化）
+                    group_files_abs = [str(Path(p).expanduser().resolve()) for p in sorted(group_files)]
+                    output_file_abs = str(Path(output_file).expanduser().resolve())
+
+                    cmd = ['taskset', '-c', f'0-{self.num_cores - 1}', sys.executable, 'main.py']
+                    cmd.extend(group_files_abs)
+                    cmd.append(output_file_abs)
+
                     # Set environment variables to limit CPU cores
                     env = os.environ.copy()
                     env["OMP_NUM_THREADS"] = str(self.num_cores)
@@ -246,15 +283,16 @@ class ProgramExecutor:
                     exec_time = time.time() - exec_start_time
                     total_execution_time += exec_time
                     
-                except subprocess.TimeoutExpired as e:
-                    error_data = {
-                        "message": f"Program execution timed out after {self.timeout} seconds"
-                    }
-                    os.killpg(e.pid, signal.SIGTERM)  # You can also use SIGKILL
+                except subprocess.TimeoutExpired:
+                    error_data = {"message": f"Program execution timed out after {self.timeout} seconds"}
+                    # NOTE: run() 不返回进程对象，拿不到 pid，不能 kill。要杀进程需要改用 Popen（此处先不动框架）。
                     with open(cost_file, 'w') as f:
                         json.dump(error_data, f, indent=2)
-                    all_outputs.append(f"Test case {base_name}:\nProgram execution timed out after {self.timeout} seconds")
+                    all_outputs.append(
+                        f"Test case {base_name}:\nProgram execution timed out after {self.timeout} seconds"
+                    )
                     continue
+
                 
                 if run_result.returncode != 0:
                     # Save error message directly to cost file
@@ -277,10 +315,11 @@ class ProgramExecutor:
                     continue
                 
                 
-                # Prepare evaluator command with all input files
-                eval_cmd = ['python3', 'feedback.py']
-                eval_cmd.extend(sorted(group_files))  # Add all input files
-                eval_cmd.append(str(output_file))  # Add output file
+                eval_cmd = [sys.executable, 'feedback.py']
+                eval_cmd.extend(group_files_abs)
+                eval_cmd.append(output_file_abs)
+
+
                 
                 # Measure evaluation time
                 eval_start_time = time.time()
@@ -358,12 +397,15 @@ class ProgramExecutor:
                 test_case_name = name_match.group(1).strip()
                 
                 # Extract the cost for this test case
-                cost_match = re.search(r'cost: (\d+)', test_output.lower())
-                if cost_match:
-                    cost = int(cost_match.group(1))
-                    results[test_case_name] = cost
+                m = re.search(r'cost:\s*([0-9]+(?:\.[0-9]+)?)', test_output.lower())
+                if m:
+                    cost = float(m.group(1))
+                elif 'nan' in test_output.lower():
+                    cost = float('nan')
                 else:
-                    results[test_case_name] = float('inf')
+                    cost = float('inf')
+
+                results[test_case_name] = cost
                 
             return results
         except Exception as e:
@@ -575,10 +617,10 @@ These are the test cases and results from the previous iteration:
 """
 
             # Get file paths from the dataset
-            if not self.dataset or "train" not in self.dataset:
+            if not self.dataset or "demo" not in self.dataset:
                 prompt += f"\nNo test cases found in the dataset for {problem_desc['name']}\n\n"
             else:
-                file_paths = self.dataset["train"]["file_path"]
+                file_paths = self.dataset["demo"]["file_path"]
                 # Apply few_shots limit if specified
                 if self.few_shots is not None:
                     file_paths = file_paths[:self.few_shots]
@@ -1083,7 +1125,14 @@ def parse_arguments():
     
     parser.add_argument('--few_shots', type=int, default=None,
                         help='Number of training examples to provide to LLMs (default: None, use all examples)')
-    
+    # === 本地数据路径配置 ===
+    parser.add_argument('--data_root', type=str, default='_datasets',
+                    help='Local dataset root directory (default: _datasets)')
+    parser.add_argument('--data_glob', type=str, default='**/*',
+                    help='Glob for selecting input files under data_root/problem (e.g., "*.mat")')
+    parser.add_argument('--problems_dir', type=str, default=None,
+                    help='If your problems are under a subfolder (e.g., "problems"), set this.')
+
     args = parser.parse_args()
     
     # Set stream to True by default if any Qwen model is in the list
@@ -1096,23 +1145,32 @@ def parse_arguments():
 def main():
     # Parse command line arguments
     args = parse_arguments()
-
-    load_dotenv()
-    # Get token from environment variable
-    token = os.getenv("HUGGINGFACE_TOKEN")
-    if not token:
-        raise ValueError("HUGGINGFACE_TOKEN not found in .env file")
-    
-    # Log in with your HF access token
-    login(token=token)
+    load_dotenv()  # 可留可删，和本地数据无关
     workspace_root = os.getcwd()
-    
+
     # Initialize components
     problem_reader = ProblemReader(workspace_root)
+
+    # Load dataset from local disk
+    dataset = load_local_dataset(args.problem, data_root=args.data_root, pattern=args.data_glob)
+    print(f"Loaded local dataset: {(Path(args.data_root).expanduser().resolve() / args.problem)} (pattern={args.data_glob})")
+
+    # load_dotenv()
+    # # Get token from environment variable
+    # token = os.getenv("HUGGINGFACE_TOKEN")
+    # if not token:
+    #     raise ValueError("HUGGINGFACE_TOKEN not found in .env file")
     
-    # Load dataset first
-    dataset = load_dataset(HF_REPO_ID, name=args.problem, data_dir="_datasets", token=token, trust_remote_code=True)  # ignore cached old copy
-    print(f"Loaded dataset from HuggingFace: {HF_REPO_ID}/{args.problem}")
+    # # Log in with your HF access token
+    # login(token=token)
+    # workspace_root = os.getcwd()
+    
+    # # Initialize components
+    # problem_reader = ProblemReader(workspace_root)
+    
+    # # Load dataset first
+    # dataset = load_dataset(HF_REPO_ID, name=args.problem, data_dir="_datasets", token=token, trust_remote_code=True)  # ignore cached old copy
+    # print(f"Loaded dataset from HuggingFace: {HF_REPO_ID}/{args.problem}")
     
     # Initialize LLM interface with dataset and history_rounds
     llm_interface = LLMInterface(args.models, dataset, args.timeout, args.temperature, args.stream, args.history_rounds, args.few_shots)
@@ -1121,11 +1179,21 @@ def main():
     problem_folders = problem_reader.get_problem_folders()
     
     # Filter by specific problem if provided
+    # Filter by specific problem if provided
     if args.problem:
-        problem_folders = [p for p in problem_folders if p.name == args.problem]
-        if not problem_folders:
-            logger.error(f"Problem '{args.problem}' not found")
-            return
+        # === 修改开始：兼容 problems/ 子目录 ===
+        candidates = [p for p in problem_folders if p.name == args.problem]
+        if args.problems_dir:
+            alt = Path(workspace_root) / args.problems_dir / args.problem
+            if alt.exists() and alt.is_dir():
+                candidates.append(alt)
+        problem_folders = candidates
+    # === 修改结束 ===
+
+    if not problem_folders:
+        logger.error(f"Problem '{args.problem}' not found")
+        return
+
     
     # Process each problem
     for problem_folder in problem_folders:
@@ -1149,9 +1217,16 @@ def main():
                 workspace_root = Path(os.getcwd())
                 solution_dir = workspace_root / "llm_solutions" / timestamp / problem_desc['name'] / base_model_name
                 solution_dir.mkdir(parents=True, exist_ok=True)
-                
-                # Initialize program executor with the solution directory
-                executor = ProgramExecutor(workspace_root / problem_desc['name'], solution_dir, dataset, args.timeout, args.num_cores, args.few_shots)
+                # === 修改开始：根据 --problems_dir 选择实际问题目录 ===
+                if args.problems_dir:
+                    problem_folder = Path(workspace_root) / args.problems_dir / problem_desc['name']
+                else:
+                    problem_folder = Path(workspace_root) / problem_desc['name']
+                # === 修改结束 ===
+
+                executor = ProgramExecutor(problem_folder, solution_dir, dataset,
+                                        args.timeout, args.num_cores, args.few_shots)
+
                 
                 # Get iterative program
                 logger.info(f"Getting iterative program from {model}")
@@ -1166,19 +1241,21 @@ def main():
                 # After each model finishes, run collect_results.py for that model
                 logger.info(f"Model {model} finished. Running collect_results.py...")
                 llm_solutions_dir = workspace_root / "llm_solutions" / timestamp / problem_desc['name'] / base_model_name
-                dataset_path = workspace_root / "_datasets" / args.problem
-                
+                dataset_root = Path(args.data_root).expanduser().resolve() / args.problem
+                eval_dir = dataset_root / "eval"
+                train_dir = dataset_root / "train"
+
+                if eval_dir.exists():
+                    dataset_path = eval_dir
+                elif train_dir.exists():
+                    dataset_path = train_dir
+                else:
+                    dataset_path = dataset_root
+
                 # Run collect_results.py with the appropriate arguments
-                collect_cmd = [
-                    "python3",
-                    "scripts/collect_results.py",
-                    str(llm_solutions_dir),
-                    str(dataset_path),
-                    "--timeout",
-                    str(args.timeout),
-                    "--num_cores",
-                    str(args.num_cores)
-                ]
+                collect_cmd = [sys.executable, 'scripts/collect_results.py', str(llm_solutions_dir), str(dataset_path),
+                '--timeout', str(args.timeout), '--num_cores', str(args.num_cores)]
+
                 
                 try:
                     subprocess.run(collect_cmd, check=True)
