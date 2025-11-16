@@ -1,0 +1,102 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+*.result
+.vscode
+*.txt
+**/output/
+**/_programs/
+*.png
+llm_solutions
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.pytest_cache/
+.coverage
+htmlcov/
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# ILP
+*.lp
+*.log
+*.output
+*.sol
+
+# tech mapping ABC history
+abc.history
+run_abc.sh
+run_abc_minimize_area.sh
+run_abc_batch.sh
+run_llm_solver_agent.sh
+run_baseline.sh
+run_baseline_batch.sh
+
+run_pdptw.sh
+
+.DS_Store
+run.sh
+run_.sh
+collect_results.sh
+min_cut_runs.log
+/pedigree/baseline/pytoulbar2
+/pedigree/baseline/__pycache__
+solve_pre.sh
+
+_datasets/
