@@ -11,11 +11,13 @@ from collections import defaultdict
 from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
-from SGD import sgd_solve, _draw_png_matplotlib
+from SGD import sgd_solve, _draw_png_matplotlib, compute_sgd_stress
+import time
 
 REPO_ROOT = Path(__file__).resolve().parent.parent  # scripts/ 的上一级就是仓库根
 KNOWN_SPLITS = {"demo", "eval", "train", "val", "test"}
 KNOWN_PROBLEMS = {"operator_scheduling", "technology_mapping", "sgd_graph_layout", "SGD", "s_gd2"}
+
 
 def load_metric_module(metric_path):
     """Dynamically load metric module from the given path or fall back to scripts directory."""
@@ -33,15 +35,16 @@ def load_metric_module(metric_path):
         spec.loader.exec_module(metric_module)
         return metric_module
 
+
 def find_iteration_dirs(base_dir):
     """Find all iteration directories and their sample subdirectories."""
     iteration_dirs = set()  # Use set to prevent duplications
-    
+
     # First, find all iteration directories
     for root, dirs, files in os.walk(base_dir):
         # Skip hidden directories and unnecessary subdirectories
         dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ["__pycache__", "output"]]
-        
+
         # Look for iteration directories
         if "iteration" in root:
             # If this is a main iteration directory, check for sample subdirectories
@@ -55,6 +58,7 @@ def find_iteration_dirs(base_dir):
                         iteration_dirs.add(sample_dir)
 
     return sorted(list(iteration_dirs))  # Convert set to sorted list for consistent order
+
 
 def get_stage_number(error_type):
     """Get the stage number from error type."""
@@ -88,6 +92,7 @@ def classify_error(message):
 
     return "Unknown Error"
 
+
 def extract_errors(iteration_dir):
     """Extract error information from .cost files in the iteration directory."""
     errors = {}
@@ -110,7 +115,8 @@ def extract_errors(iteration_dir):
                             "validity": cost_data.get("validity", False),
                             "cost": cost_data.get("cost", None),
                             "message": message,
-                            "error_type": classify_error(message) if not cost_data.get("validity", False) else "Stage IV: No Error!!"
+                            "error_type": classify_error(message) if not cost_data.get("validity",
+                                                                                       False) else "Stage IV: No Error!!"
                         }
                 except Exception as e:
                     errors[test_case] = {
@@ -119,6 +125,7 @@ def extract_errors(iteration_dir):
                     }
 
     return errors
+
 
 def find_run_files(base_dir):
     """Find all run.py files in iteration directories and their sample subdirectories."""
@@ -137,6 +144,7 @@ def find_run_files(base_dir):
                 run_files.append(os.path.join(root, "run.py"))
     return run_files
 
+
 def run_optimization(run_file, dataset_path, timeout=10, num_cores=8):
     """Run the optimization script and return the results."""
     try:
@@ -150,7 +158,7 @@ def run_optimization(run_file, dataset_path, timeout=10, num_cores=8):
             text=True,
             check=True,
             stdout=subprocess.PIPE,  # Stream stdout to terminal
-            stderr=subprocess.PIPE   # Stream stderr to terminal
+            stderr=subprocess.PIPE  # Stream stderr to terminal
         )
         print(result.stdout)
         print(result.stderr)
@@ -165,6 +173,7 @@ def run_optimization(run_file, dataset_path, timeout=10, num_cores=8):
     except Exception as e:
         print(f"Error running {run_file}: {e}")
         return None
+
 
 def read_baseline_values(baseline_path):
     """Read baseline values from baseline.json; normalize keys and extract numeric values."""
@@ -218,10 +227,10 @@ def calculate_geomean(results, baseline_values, normalize_score):
 
     # Calculate geometric mean of normalized scores (quality)
     quality = math.exp(sum(math.log(x) for x in valid_values) / len(valid_values))
-    
+
     # Calculate coverage (pass rate)
     coverage = valid_datasets / total_datasets
-    
+
     # Calculate QCI (Quality-Coverage Index) using F1-like formula
     if quality + coverage == 0:
         qci = 0.0
@@ -229,6 +238,7 @@ def calculate_geomean(results, baseline_values, normalize_score):
         qci = 2 * quality * coverage / (quality + coverage)
 
     return quality, coverage, qci
+
 
 def calculate_solve_at_i(all_errors, i):
     """Calculate solve@i metrics for the first i iterations."""
@@ -238,7 +248,7 @@ def calculate_solve_at_i(all_errors, i):
         # Extract iteration number from key (e.g., "iteration0/sample0" -> "iteration0")
         iteration_num = key.split('/')[0]
         iteration_groups[iteration_num].append(key)
-    
+
     # Get the first i iteration groups
     first_i_iterations = sorted(iteration_groups.keys())[:i]
 
@@ -249,10 +259,10 @@ def calculate_solve_at_i(all_errors, i):
     for iteration in first_i_iterations:
         # Get all samples for this iteration
         samples = iteration_groups[iteration]
-        
+
         # For each test case, check if any sample passes each stage
         test_case_stages = defaultdict(int)
-        
+
         # First, find the best stage achieved by any sample for each test case
         for sample in samples:
             iteration_errors = all_errors[sample]
@@ -261,7 +271,7 @@ def calculate_solve_at_i(all_errors, i):
                 stage_num = get_stage_number(error_type)
                 if stage_num > 0:  # If it's a valid stage
                     test_case_stages[test_case] = max(test_case_stages[test_case], stage_num - 1)
-        
+
         # Update the overall best stages with this iteration's results
         for test_case, stage in test_case_stages.items():
             test_case_best_stages[test_case] = max(test_case_best_stages[test_case], stage)
@@ -274,6 +284,7 @@ def calculate_solve_at_i(all_errors, i):
             stage_pass_stats[s] += 1
 
     return stage_pass_stats
+
 
 def remove_output_folders(base_dir):
     """Remove all output folders under iteration directories."""
@@ -292,6 +303,7 @@ def remove_output_folders(base_dir):
 
     return removed_count
 
+
 def draw_layout_outputs(base_dir, dataset_path, iteration_dirs):
     print("\n=== Drawing layout comparison figures ===")
 
@@ -305,15 +317,17 @@ def draw_layout_outputs(base_dir, dataset_path, iteration_dirs):
         return
 
     for fname in dataset_files:
-        base = fname[:-4]  # dataset 名
+        base = fname[:-4]
         input_file = os.path.join(dataset_path, fname)
 
         print(f"\nProcessing dataset: {base}")
 
-        # baseline
+        # ========= baseline =========
+        t0 = time.time()
         I, J, base_layout, base_stress, nodes = sgd_solve(input_file, 120)
+        t1 = time.time()
+        base_runtime = t1 - t0
 
-        # subplot 数量 = baseline + iterations
         nplots = 1 + len(iteration_dirs)
 
         fig, axes = plt.subplots(
@@ -321,19 +335,22 @@ def draw_layout_outputs(base_dir, dataset_path, iteration_dirs):
             figsize=(6 * nplots, 6)
         )
 
-        if nplots == 1:  # 如果只有 baseline
+        if nplots == 1:
             axes = [axes]
 
-        # baseline 图
+        # ========= baseline plot =========
         _draw_png_matplotlib(base_layout, I, J, ax=axes[0])
         axes[0].set_title(f"{base} - baseline (SGD)")
+
         axes[0].text(
             0.5, -0.1,
-            f"stress: {base_stress:.5f}\nnodes:{nodes}",
+            f"stress: {base_stress:.5f}\n"
+            f"time: {base_runtime:.4f}s\n"
+            f"nodes: {nodes}",
             ha="center", va="top", transform=axes[0].transAxes
         )
 
-        # iteration 图
+        # ========= iterations (no runtime) =========
         for idx, iter_dir in enumerate(sorted(iteration_dirs)):
             iter_name = os.path.basename(iter_dir)
             ax = axes[idx + 1]
@@ -343,7 +360,6 @@ def draw_layout_outputs(base_dir, dataset_path, iteration_dirs):
 
             if os.path.exists(solver_out_dir):
                 for f in os.listdir(solver_out_dir):
-                    # 匹配 dataset 名称
                     if f.startswith(base) and f.endswith(".output"):
                         matched_output = os.path.join(solver_out_dir, f)
                         break
@@ -357,8 +373,23 @@ def draw_layout_outputs(base_dir, dataset_path, iteration_dirs):
             else:
                 try:
                     llm_layout = np.loadtxt(matched_output, usecols=(1, 2))
+
+                    # ==== stress ====
+                    A = np.zeros((nodes, nodes))
+                    A[I, J] = 1
+                    A[J, I] = 1
+                    llm_stress = compute_sgd_stress(A, llm_layout)
+
+                    # ==== draw ====
                     _draw_png_matplotlib(llm_layout, I, J, ax=ax)
                     ax.set_title(f"{iter_name}")
+
+                    ax.text(
+                        0.5, -0.1,
+                        f"stress: {llm_stress:.5f}\n"
+                        f"nodes: {nodes}",
+                        ha="center", va="top", transform=ax.transAxes
+                    )
                 except:
                     ax.set_title(f"{iter_name} (ERR)")
                     ax.text(
@@ -370,18 +401,20 @@ def draw_layout_outputs(base_dir, dataset_path, iteration_dirs):
         plt.savefig(save_path, dpi=200, bbox_inches="tight")
         plt.close(fig)
         print(f"Saved -> {save_path}")
+
     print("\n=== Layout drawing completed ===")
+
 
 def create_solve_output_folders(iteration_dirs):
     """Create solve_output folders in all iteration output directories."""
     created_count = 0
-    
+
     for iteration_dir in iteration_dirs:
         output_dir = os.path.join(iteration_dir, "output")
-        
+
         if os.path.exists(output_dir):
             solve_output_dir = os.path.join(output_dir, "solve_output")
-            
+
             if not os.path.exists(solve_output_dir):
                 try:
                     os.makedirs(solve_output_dir, exist_ok=True)
@@ -391,8 +424,9 @@ def create_solve_output_folders(iteration_dirs):
                     print(f"Error creating {solve_output_dir}: {e}")
             else:
                 print(f"Already exists: {solve_output_dir}")
-    
+
     return created_count
+
 
 def main():
     # Parse command line arguments
@@ -405,7 +439,7 @@ def main():
                         help='Number of CPU cores to use for program execution (default: 8)')
     parser.add_argument('--clean', action='store_true',
                         help='Clean output folders before processing')
-    
+
     args = parser.parse_args()
 
     base_dir = args.llm_solutions_dir
@@ -427,11 +461,11 @@ def main():
     problem_dir = REPO_ROOT / problem_dirname  # 绝对路径到 problem 目录
     metric_path = str(problem_dir / "program" / "metric.py")
     baseline_path = str(problem_dir / "baseline" / "baseline.json")
-    
+
     # Load metric module
     metric_module = load_metric_module(metric_path)
     normalize_score = metric_module.normalize_score
-    
+
     baseline_values = read_baseline_values(baseline_path)
     if not baseline_values:
         print("Error: No baseline values found. Exiting.")
@@ -473,13 +507,13 @@ def main():
     for run_file in run_files:
         print(f"Processing optimization in {run_file}...")
         results = run_optimization(run_file, os.path.abspath(dataset_path), args.timeout, args.num_cores)
-        
+
         # Get iteration name and sample number from path
         path_parts = run_file.split(os.sep)
         # Find the iteration directory index
         iteration_idx = next(i for i, p in enumerate(path_parts) if p.startswith("iteration"))
         iteration_name = path_parts[iteration_idx]
-        
+
         # Check if this is a sample run by looking at the next directory
         if iteration_idx + 1 < len(path_parts) and path_parts[iteration_idx + 1].startswith("sample"):
             sample_name = path_parts[iteration_idx + 1]
@@ -512,18 +546,18 @@ def main():
         }
         print(f"{iteration:<30} | {quality:<10.4f} | {coverage:<10.4f} | {qci:<10.4f}")
 
-        if qci >= best_qci: # take the last best iteration
+        if qci >= best_qci:  # take the last best iteration
             best_qci = qci
             best_iteration = iteration
 
     print("=" * 100)
-    
+
     # If all iterations have zero QCI, use the last iteration
     if best_qci == 0.0:  # Changed condition to check for zero QCI
         best_iteration = list(iteration_results.keys())[-1]
         best_qci = iteration_metrics[best_iteration]['qci']
         print(f"All iterations have zero QCI. Using last iteration: {best_iteration}")
-    
+
     print(f"Best iteration: {best_iteration} with QCI: {best_qci:.4f}")
 
     # Use results from the best iteration
@@ -565,7 +599,7 @@ def main():
         # Find the iteration directory index
         iteration_idx = next(i for i, p in enumerate(path_parts) if p.startswith("iteration"))
         iteration_name = path_parts[iteration_idx]
-        
+
         # Check if this is a sample directory by looking at the next directory
         if iteration_idx + 1 < len(path_parts) and path_parts[iteration_idx + 1].startswith("sample"):
             sample_name = path_parts[iteration_idx + 1]
@@ -637,11 +671,11 @@ def main():
             solve_at_i_metrics[i] = {}
             for stage in range(1, 4):
                 passed = stage_pass_stats_i[stage]
-                print(f"solve_s{stage}@{i}: {passed}/{total_cases} passed ({passed/total_cases*100:.1f}%)")
+                print(f"solve_s{stage}@{i}: {passed}/{total_cases} passed ({passed / total_cases * 100:.1f}%)")
                 solve_at_i_metrics[i][f"stage_{stage}"] = {
                     "passed": passed,
                     "total": total_cases,
-                    "percentage": passed/total_cases*100
+                    "percentage": passed / total_cases * 100
                 }
 
     # Save all results to files
