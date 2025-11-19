@@ -21,31 +21,30 @@ def main():
     # Get all input files and output file
     input_files = sys.argv[1:-1]  # All arguments except the last one are input files
     output_file = sys.argv[-1]  # Last argument is the output file
-    raw_output_file = output_file
-    # Copy output file to solve_output folder (folder should already exist)
-    if os.path.exists(raw_output_file):
-        solve_output_dir = os.path.join(os.path.dirname(raw_output_file), "solve_output")
+
+    # ---------- NEW: safe copy of .output file ----------
+    if os.path.exists(output_file):
+        solve_output_dir = os.path.join(os.path.dirname(output_file), "solve_output")
         os.makedirs(solve_output_dir, exist_ok=True)
+        dest = os.path.join(solve_output_dir, os.path.basename(output_file))
         try:
-            dest_file = os.path.join(solve_output_dir, os.path.basename(raw_output_file))
-            shutil.move(raw_output_file, dest_file) 
-            print(f"Moved {raw_output_file} to {dest_file}", file=sys.stderr)
-        except Exception as e:  
-            print(f"Warning: Failed to copy output file: {e}", file=sys.stderr)
+            shutil.copy2(output_file, dest)
+            print(f"[feedback] Copied {output_file} → {dest}", file=sys.stderr)
+        except Exception as e:
+            print(f"[feedback] Warning: failed to copy: {e}", file=sys.stderr)
+    # ---------- END NEW ----------
 
     # Capture stderr output during verification
     stderr_capture = io.StringIO()
     with redirect_stderr(stderr_capture):
-        # Pass all input files to verify function
         valid, error_message = verify(*input_files, output_file)
-    # Check if there were any stderr messages and append them to error_message
+
     stderr_output = stderr_capture.getvalue()
     if stderr_output:
         error_message = (error_message + "\n" + stderr_output).strip()
 
     # Calculate the cost
     if valid:
-        # Pass all input files to evaluate function
         cost = evaluate(*input_files, output_file)
     else:
         cost = float("inf")
@@ -56,7 +55,6 @@ def main():
         "cost": cost,
         "message": ("Verification failed: " if not valid else "") + error_message,
     }
-
 
     # Write the output to a JSON file
     output_file = f"{os.path.splitext(output_file)[0]}.cost"
