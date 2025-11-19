@@ -8,6 +8,7 @@ import argparse
 import subprocess
 import shutil
 import sys
+import math
 import requests
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -20,9 +21,118 @@ from config import calculate_cost
 
 # HF_REPO_ID = "heurigen/heurigen-data"
 
-# Configure logging
-from pathlib import Path
-# ... 现有导入保持
+def write_summary_markdown(model_dir, model_name, problem_name, args):
+    """
+    在每个 model 目录下生成 summary.md，包含：
+    - Run Meta：问题名、模型名、run_id、git commit
+    - Run Config：超参数 & 数据路径
+    - Iteration Metrics：从 metrics.log 里读 QCI 表
+    - Dataset Costs：从 best_results.json 里读每个数据集最优 cost
+    """
+    import json
+    from pathlib import Path
+
+    model_dir = Path(model_dir)
+
+    # ---- run_id 从目录结构里推出来：llm_solutions/<run_id>/<problem>/<model> ----
+    try:
+        run_id = model_dir.parents[2].name
+    except Exception:
+        run_id = ""
+
+    # 这里直接用下面已经定义过的工具函数，运行时是能找到的
+    git_id = get_git_commit_id()
+
+    # ---- 读 iteration 指标（metrics.log）----
+    iter_rows = []
+    metrics_path = model_dir / "metrics.log"
+    if metrics_path.exists():
+        with open(metrics_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                # 既兼容 "iteration0 | ..." 也兼容前面有空格的情况
+                if line.startswith("iteration"):
+                    parts = [x.strip() for x in line.split("|")]
+                    if len(parts) >= 4:
+                        # iteration, quality, coverage, qci
+                        iter_rows.append((parts[0], parts[1], parts[2], parts[3]))
+
+    # ---- 读 best_results.json，兼容两种结构：{...} 或 {"datasets": {...}} ----
+    dataset_rows = []
+    br_path = model_dir / "best_results.json"
+    if br_path.exists():
+        try:
+            data = json.loads(br_path.read_text())
+            if isinstance(data, dict) and "datasets" in data:
+                dsinfo = data["datasets"]
+            else:
+                dsinfo = data
+
+            if isinstance(dsinfo, dict):
+                for ds, info in dsinfo.items():
+                    if isinstance(info, dict):
+                        best_cost = info.get("best_cost", info.get("cost", "inf"))
+                        best_iter = info.get("best_iteration", "")
+                        src = info.get("source", "")
+                    else:
+                        best_cost, best_iter, src = info, "", ""
+                    dataset_rows.append((ds, best_cost, best_iter, src))
+        except Exception:
+            # 不让它崩，最多就是下面显示 "No dataset info"
+            pass
+
+    # ---- 收集运行参数 ----
+    t = getattr(args, "temperature", "")
+    tout = getattr(args, "timeout", "")
+    itn = getattr(args, "iterations", "")
+    hr = getattr(args, "history_rounds", "")
+    nc = getattr(args, "num_cores", "")
+    fs = getattr(args, "few_shots", "")
+    dr = getattr(args, "data_root", "")
+    dg = getattr(args, "data_glob", "")
+
+    out = model_dir / "summary.md"
+    with open(out, "w") as f:
+        # ===== Run Meta =====
+        f.write("# Run Summary\n\n")
+        f.write("## Run Meta\n\n")
+        f.write(f"- **Problem**: `{problem_name}`\n")
+        f.write(f"- **Model**: `{model_name}`\n")
+        f.write(f"- **Run ID**: `{run_id}`\n")
+        f.write(f"- **Git Commit**: `{git_id}`\n\n")
+
+        # ===== Run Config（超参数 + 数据路径）=====
+        f.write("## Run Config\n\n")
+        f.write("|Key|Value|\n|---|---|\n")
+        f.write(f"|iterations|{itn}|\n")
+        f.write(f"|timeout(s)|{tout}|\n")
+        f.write(f"|temperature|{t}|\n")
+        f.write(f"|history_rounds|{hr}|\n")
+        f.write(f"|num_cores|{nc}|\n")
+        f.write(f"|few_shots|{fs}|\n")
+        f.write(f"|data_root|{dr}|\n")
+        f.write(f"|data_glob|{dg}|\n\n")
+
+        # ===== Iteration Metrics =====
+        f.write("## Iteration Metrics\n\n")
+        if iter_rows:
+            f.write("|Iteration|Quality|Coverage|QCI|\n|---|---|---|---|\n")
+            for row in iter_rows:
+                f.write(f"|{row[0]}|{row[1]}|{row[2]}|{row[3]}|\n")
+            f.write("\n")
+        else:
+            f.write("_No iteration metrics_\n\n")
+
+        # ===== Dataset Costs =====
+        f.write("## Dataset Costs\n\n")
+        if dataset_rows:
+            f.write("|Dataset|Best Cost|Best Iteration|Source|\n|---|---|---|---|\n")
+            for row in dataset_rows:
+                f.write(f"|{row[0]}|{row[1]}|{row[2]}|{row[3]}|\n")
+            f.write("\n")
+        else:
+            f.write("_No dataset info_\n\n")
+
 # === 本地数据加载器（替代 HuggingFace） ===
 # === 本地数据加载器（替代 HuggingFace；统一绝对路径） ===
 def load_local_dataset(problem: str, data_root: str = "_datasets", pattern: str = "*.mat") -> Dict:
@@ -1052,51 +1162,90 @@ Your goal is to improve the solution for as many test cases as possible, with sp
         return current_program, max_iterations - 1
 
 def generate_summary_table(results_data):
-    """Generate a formatted summary table comparing all models' performance."""
-    # Get all unique metrics
+    """
+    在终端里打印所有模型的 summary 表，
+    results_data 结构大概是：{ model_name: { metric_name: value, ... }, ... }
+    """
+    if not results_data:
+        return "No results to summarize."
+
+    # 聚合所有 metric 名
     all_metrics = set()
     for model_data in results_data.values():
         all_metrics.update(model_data.keys())
-    
-    # Sort metrics to ensure consistent order
+
+    # 如果所有模型都没算出任何 metric，就直接返回一句话，避免 max() on empty
+    if not all_metrics:
+        return "No metrics available (best_results.json may be empty or only contain inf costs)."
+
     sorted_metrics = sorted(all_metrics)
-    
-    # Calculate column widths
-    model_width = max(len(model) for model in results_data.keys())
+
+    model_names = list(results_data.keys())
+    model_width = max(len(m) for m in model_names)
     metric_width = max(len(metric) for metric in sorted_metrics)
-    
-    # Create header
-    header = f"{'Metric':<{metric_width}} | " + " | ".join(f"{model:<{model_width}}" for model in results_data.keys())
+
+    # 表头
+    header = f"{'Metric':<{metric_width}} | " + " | ".join(
+        f"{m:<{model_width}}" for m in model_names
+    )
     separator = "-" * len(header)
-    
-    # Create rows
+
     rows = []
     for metric in sorted_metrics:
         row = f"{metric:<{metric_width}} | "
-        row += " | ".join(f"{results_data[model].get(metric, 'N/A'):<{model_width}}" for model in results_data.keys())
+        row += " | ".join(
+            f"{results_data[m].get(metric, 'N/A'):<{model_width}}"
+            for m in model_names
+        )
         rows.append(row)
-    
-    # Combine all parts
-    table = [header, separator] + rows
-    
-    return "\n".join(table)
+
+    return "\n".join([header, separator] + rows)
+
 
 def parse_best_results(json_file):
-    """Parse best_results.json file to extract performance metrics."""
+    """
+    从 best_results.json 里抽出一些整体指标给最终的 summary 表用。
+    主要算：Avg Best Cost / Min Best Cost。
+    兼容两种结构：
+      1. {"datasets": { "1138_bus": {...}, ... }}
+      2. { "1138_bus": {...}, ... }
+    """
     metrics = {}
     try:
-        with open(json_file, 'r') as f:
-            results = json.load(f)
-            
-        # Calculate average cost
-        costs = [float(data['cost']) for data in results.values() if data['cost'] != float('inf')]
+        with open(json_file, "r") as f:
+            data = json.load(f)
+
+        if isinstance(data, dict) and "datasets" in data:
+            dsinfo = data["datasets"]
+        else:
+            dsinfo = data
+
+        if not isinstance(dsinfo, dict):
+            return metrics
+
+        costs = []
+        for _, info in dsinfo.items():
+            if isinstance(info, dict):
+                c = info.get("best_cost", info.get("cost"))
+            else:
+                c = info
+            try:
+                c_val = float(c)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(c_val):
+                costs.append(c_val)
+
         if costs:
-            metrics['Avg Cost'] = f"{sum(costs)/len(costs):.4f}"
-            
+            avg_cost = sum(costs) / len(costs)
+            metrics["Avg Best Cost"] = f"{avg_cost:.4f}"
+            metrics["Min Best Cost"] = f"{min(costs):.4f}"
+
     except Exception as e:
         logger.error(f"Error parsing best results {json_file}: {str(e)}")
-    
+
     return metrics
+
 
 def parse_arguments():
     """Parse command line arguments."""
@@ -1276,7 +1425,14 @@ def main():
                 try:
                     subprocess.run(collect_cmd, check=True)
                     logger.info(f"Successfully ran collect_results.py for {model}")
-                    
+                    write_summary_markdown(
+                        model_dir=llm_solutions_dir,
+                        model_name=model,
+                        problem_name=problem_desc['name'],
+                        args=args
+                    )
+
+
                     # Parse results from best_results.json
                     results_file = llm_solutions_dir / "best_results.json"
                     if results_file.exists():
