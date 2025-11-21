@@ -305,8 +305,6 @@ def remove_output_folders(base_dir):
 
 
 def draw_layout_outputs(base_dir, dataset_path, iteration_dirs):
-    print("\n=== Drawing layout comparison figures ===")
-
     layout_out_dir = os.path.join(base_dir, "layoutoutput")
     os.makedirs(layout_out_dir, exist_ok=True)
 
@@ -402,7 +400,6 @@ def draw_layout_outputs(base_dir, dataset_path, iteration_dirs):
         plt.close(fig)
         print(f"Saved -> {save_path}")
 
-    print("\n=== Layout drawing completed ===")
 
 
 def create_solve_output_folders(iteration_dirs):
@@ -738,7 +735,14 @@ def main():
     print(f"Metrics saved to {log_output}")
 
     # drawing layouts
-    draw_layout_outputs(base_dir, dataset_path, iteration_dirs)
+    problem_dataset_path = ds_p.parent if ds_p.name in KNOWN_SPLITS else ds_p
+    print("\n=== Drawing layout comparison figures ===")
+    # 遍历 problem_dataset_path 下的所有子目录
+    for sub in problem_dataset_path.iterdir():
+        if sub.is_dir():
+            print(f"Drawing layouts for split: {sub}")
+            draw_layout_outputs(base_dir, str(sub), iteration_dirs)
+    print("\n=== Layout drawing completed ===")
 
 
 if __name__ == "__main__":
