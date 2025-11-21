@@ -101,17 +101,32 @@ def write_summary_markdown(model_dir, model_name, problem_name, args):
         f.write(f"- **Run ID**: `{run_id}`\n")
         f.write(f"- **Git Commit**: `{git_id}`\n\n")
 
-        # ===== Run Config（超参数 + 数据路径）=====
+            # ===== Run Config =====
         f.write("## Run Config\n\n")
-        f.write("|Key|Value|\n|---|---|\n")
-        f.write(f"|iterations|{itn}|\n")
-        f.write(f"|timeout(s)|{tout}|\n")
-        f.write(f"|temperature|{t}|\n")
-        f.write(f"|history_rounds|{hr}|\n")
-        f.write(f"|num_cores|{nc}|\n")
-        f.write(f"|few_shots|{fs}|\n")
-        f.write(f"|data_root|{dr}|\n")
-        f.write(f"|data_glob|{dg}|\n\n")
+
+        config_items = [
+            ("iterations", itn),
+            ("timeout(s)", tout),
+            ("temperature", t),
+            ("history_rounds", hr),
+            ("num_cores", nc),
+            ("few_shots", fs),
+            ("data_root", dr),
+            ("data_glob", dg)
+        ]
+
+        # 动态宽度
+        key_width = max(len(k) for k, _ in config_items)
+        val_width = max(len(str(v)) for _, v in config_items)
+
+        f.write(f"|{'Key'.ljust(key_width)}|{'Value'.ljust(val_width)}|\n")
+        f.write(f"|{'-'*key_width}|{'-'*val_width}|\n")
+
+        for k, v in config_items:
+            f.write(f"|{k.ljust(key_width)}|{str(v).ljust(val_width)}|\n")
+
+        f.write("\n")
+
 
         # ===== Iteration Metrics =====
         f.write("## Iteration Metrics\n\n")
@@ -123,15 +138,28 @@ def write_summary_markdown(model_dir, model_name, problem_name, args):
         else:
             f.write("_No iteration metrics_\n\n")
 
-        # ===== Dataset Costs =====
+                # ===== Dataset Costs =====
         f.write("## Dataset Costs\n\n")
+
         if dataset_rows:
-            f.write("|Dataset|Best Cost|Best Iteration|Source|\n|---|---|---|---|\n")
+            headers = ["Dataset", "Best Cost", "Best Iteration", "Source"]
+            col_widths = [
+                max(len(str(row[i])) for row in dataset_rows + [headers])
+                for i in range(4)
+            ]
+
+            # 写表头
+            f.write("|" + "|".join(headers[i].ljust(col_widths[i]) for i in range(4)) + "|\n")
+            f.write("|" + "|".join("-"*col_widths[i] for i in range(4)) + "|\n")
+
+            # 写数据
             for row in dataset_rows:
-                f.write(f"|{row[0]}|{row[1]}|{row[2]}|{row[3]}|\n")
+                f.write("|" + "|".join(str(row[i]).ljust(col_widths[i]) for i in range(4)) + "|\n")
+
             f.write("\n")
         else:
             f.write("_No dataset info_\n\n")
+
 
 # === 本地数据加载器（替代 HuggingFace） ===
 # === 本地数据加载器（替代 HuggingFace；统一绝对路径） ===
